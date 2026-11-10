@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Next Meeting
+Comment=Time until your next Google Calendar meeting
+Type=Application
+Exec=cosmic-ext-applet-gcal-next
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Calendar;Meeting;Google;
+Icon=io.github.flip1995.CosmicExtAppletGcalNext
+NoDisplay=true
+X-CosmicApplet=true
+# Opening the meeting link launches the browser on the host display.
+X-HostWaylandDisplay=true

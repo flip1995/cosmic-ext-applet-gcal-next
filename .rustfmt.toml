@@ -1,0 +1,2 @@
+# Specifies which edition is used by the parser.
+edition = "2024"

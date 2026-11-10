@@ -92,10 +92,12 @@ Keep `state.rs`, `format.rs` and `source/` free of UI code, and never call
   `depends` is maintained by hand (from `ldd` + `pacman -Qo`, plus the
   dlopen()ed `wayland`); re-check when bumping libcosmic. namcap in the release
   workflow flags gaps.
-- CI (`.github/workflows/ci.yml`, `archlinux:base-devel`): fmt, clippy
-  `-D warnings`, tests, package build. Release (`release.yml`) on tag `v*`:
-  checks tag == `Cargo.toml` version, tests, packages, namcap, installs and
-  smoke-tests the package, publishes `.pkg.tar.zst` + `SHA256SUMS`.
+- One workflow, `.github/workflows/ci.yml` (`archlinux:base-devel`). Job
+  `check` (main, PRs, tags): fmt, clippy `-D warnings`, tests, package build,
+  uploaded as artifact; on tags it first checks tag == `Cargo.toml` version.
+  Job `release` (tags `v*` only, `needs: check`): reuses that artifact — no
+  second build or test run — runs namcap, installs and smoke-tests the
+  package, publishes `.pkg.tar.zst` + `SHA256SUMS`.
 - Release: bump `version` in `Cargo.toml` (+ `Cargo.lock`), describe the change,
   `jj bookmark set main -r @-`, `jj git push`, then `jj tag set vX.Y.Z -r main`
   and `jj git push --tag vX.Y.Z`.

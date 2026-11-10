@@ -1,8 +1,12 @@
 name: CI
 
+# Pushes to main and PRs: check + package. Tags `v*`: the same, then the
+# release job publishes the package the check job built (no second build or
+# test run).
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 permissions:
@@ -22,6 +26,17 @@ jobs:
         run: pacman -Syu --noconfirm --needed git rust just tzdata libxkbcommon wayland
 
       - uses: actions/checkout@v4
+
+      # Fail fast, before the long build.
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -47,10 +62,71 @@ jobs:
           tar -xzf "nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" nfpm
           install -m755 nfpm /usr/local/bin/nfpm
 
-      # Build only, so nfpm.yaml breakage shows up before a release.
+      # Always build the package, so nfpm.yaml breakage shows up before a
+      # release; on tags it is the release artifact.
       - run: just package
 
       - uses: actions/upload-artifact@v4
         with:
           name: package
           path: dist/*.pkg.tar.zst
+
+  release:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git github-cli namcap tzdata
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: dist
+
+      - name: namcap
+        # Flags missing or unneeded `depends`, which are kept by hand.
+        run: namcap dist/*.pkg.tar.zst || true
+
+      # Not a test run: checks that the package installs (depends resolve)
+      # and the installed binary works.
+      - name: Smoke test the package
+        run: |
+          pacman -U --noconfirm dist/*.pkg.tar.zst
+          test -x /usr/bin/cosmic-ext-applet-gcal-next
+          test -f /usr/share/applications/io.github.flip1995.CosmicExtAppletGcalNext.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/io.github.flip1995.CosmicExtAppletGcalNext.svg
+          cosmic-ext-applet-gcal-next --version
+          out="$(TZ=Europe/Berlin cosmic-ext-applet-gcal-next --once \
+            --ics-file tests/fixtures/google.ics --now 2026-11-10T09:55:00+01:00)"
+          echo "$out"
+          test "$out" = "tier<=5m 5m | Daily standup | 2026-11-10 10:00"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd dist
+          sha256sum *.pkg.tar.zst > SHA256SUMS
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          {
+            echo "Install with:"
+            echo
+            echo '```sh'
+            echo "sudo pacman -U https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$(ls *.pkg.tar.zst)"
+            echo '```'
+            echo
+            echo "## Changes"
+            echo
+            git log --no-merges --format='- %s' ${prev:+"$prev.."}"$GITHUB_REF_NAME"
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            *.pkg.tar.zst SHA256SUMS

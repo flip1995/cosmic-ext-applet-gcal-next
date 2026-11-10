@@ -108,8 +108,9 @@ just package               # Arch package into dist/ (needs nfpm)
 2. `jj bookmark set main -r @-` and `jj git push`.
 3. `jj tag set vX.Y.Z -r main` and `jj git push --tag vX.Y.Z`.
 
-The tag triggers `.github/workflows/release.yml`, which tests, packages,
-smoke-tests and publishes the `.pkg.tar.zst` with a `SHA256SUMS` file.
+The tag runs `.github/workflows/ci.yml`: once the check job (tests, package
+build) passes, the release job smoke-tests that package and publishes it with
+a `SHA256SUMS` file.
 
 ## Code of Conduct
 

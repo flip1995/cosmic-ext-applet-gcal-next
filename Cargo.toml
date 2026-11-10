@@ -1,6 +1,6 @@
 [package]
 name = "cosmic-ext-applet-gcal-next"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["flip1995 <hello@philkrones.com>"]
 edition = "2024"
 description = "Minimal COSMIC panel applet showing the time to your next Google Calendar meeting"

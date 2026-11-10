@@ -24,7 +24,7 @@ Arch Linux: download the package from the
 [releases](https://github.com/flip1995/cosmic-ext-applet-gcal-next/releases), e.g.
 
 ```sh
-sudo pacman -U https://github.com/flip1995/cosmic-ext-applet-gcal-next/releases/download/v1.0.0/cosmic-ext-applet-gcal-next-1.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U https://github.com/flip1995/cosmic-ext-applet-gcal-next/releases/download/v1.0.1/cosmic-ext-applet-gcal-next-1.0.1-1-x86_64.pkg.tar.zst
 ```
 
 From source (user-local, `~/.local`): `just install`.

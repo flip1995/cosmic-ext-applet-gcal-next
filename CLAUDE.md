@@ -90,7 +90,8 @@ Keep `state.rs`, `format.rs` and `source/` free of UI code, and never call
 
 - Arch package via **nFPM** (`nfpm.yaml`, `just package`), not a PKGBUILD.
   `depends` is maintained by hand (from `ldd` + `pacman -Qo`, plus the
-  dlopen()ed `wayland`); re-check when bumping libcosmic. namcap in the release
+  dlopen()ed `wayland`, and `hicolor-icon-theme` for the icon directories);
+  re-check when bumping libcosmic. namcap in the release
   workflow flags gaps.
 - One workflow, `.github/workflows/ci.yml` (`archlinux:base-devel`). Job
   `check` (main, PRs, tags): fmt, clippy `-D warnings`, tests, package build,

@@ -15,6 +15,7 @@ license: MIT OR Apache-2.0
 depends:
   - cosmic-panel
   - glibc
+  - hicolor-icon-theme # owns the icon directories we install into
   - libgcc
   - libxkbcommon
   - wayland

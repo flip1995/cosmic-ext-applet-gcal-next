@@ -121,7 +121,8 @@ async fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
             .await
             .with_context(|| format!("failed to create {}", dir.display()))?;
     }
-    let tmp = path.with_extension("tmp");
+    // Per process: one `--ironbar` per monitor may write at the same time.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)

@@ -3,7 +3,7 @@ name = "cosmic-ext-applet-gcal-next"
 version = "1.0.1"
 authors = ["flip1995 <hello@philkrones.com>"]
 edition = "2024"
-description = "Minimal COSMIC panel applet showing the time to your next Google Calendar meeting"
+description = "Minimal COSMIC panel applet (or Ironbar module) showing the time to your next Google Calendar meeting"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -11,6 +11,7 @@ publish = false
 anyhow = "1.0.104"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
+libc = "0.2"
 libcosmic = { git = "https://github.com/pop-os/libcosmic", version = "1.0.0", default-features = false, features = ["applet", "tokio", "wayland"] }
 oo7 = { version = "0.7", default-features = false, features = ["tokio", "native_crypto"] }
 open = "5.4.5"
@@ -18,8 +19,9 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 ron = "0.12.3"
 rrule = "0.14.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["rt", "time", "fs", "macros", "io-util"] }
+tokio = { version = "1.54.1", features = ["rt", "time", "fs", "macros", "io-util", "net", "signal"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

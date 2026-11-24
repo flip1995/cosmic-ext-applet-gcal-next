@@ -12,9 +12,13 @@ pub fn minutes_left(remaining: TimeDelta) -> i64 {
     ((secs + 59) / 60).max(1)
 }
 
-/// `1h 20m`, `2h`, `25m`, `1m`.
+/// `1h 20m`, `2h`, `25m`, `1m`: the time until a start, rounded up.
 pub fn remaining(remaining: TimeDelta) -> String {
-    let minutes = minutes_left(remaining);
+    compact(u32::try_from(minutes_left(remaining)).unwrap_or(u32::MAX))
+}
+
+/// `2h`, `30m`, `1h 30m`: zero parts are left out.
+pub fn compact(minutes: u32) -> String {
     match (minutes / 60, minutes % 60) {
         (0, m) => format!("{m}m"),
         (h, 0) => format!("{h}h"),
@@ -25,6 +29,15 @@ pub fn remaining(remaining: TimeDelta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_values() {
+        assert_eq!(compact(0), "0m");
+        assert_eq!(compact(5), "5m");
+        assert_eq!(compact(60), "1h");
+        assert_eq!(compact(90), "1h 30m");
+        assert_eq!(compact(24 * 60), "24h");
+    }
 
     #[test]
     fn labels() {

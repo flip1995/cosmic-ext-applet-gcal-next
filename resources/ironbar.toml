@@ -1,0 +1,73 @@
+# Next Meeting for Ironbar: the pill, and on click a popup like the COSMIC
+# applet's (details, Join, Refresh now, Settings…, sync status).
+#
+# Append to ~/.config/ironbar/config.toml. To put it elsewhere on the bar,
+# replace every `center` below with `start` or `end`.
+#
+# One background process (`--ironbar`, started by the hidden script module)
+# publishes the pill and the popup texts as ironvars (`gcal_next_*`); every
+# bar shows them. The buttons call back into the binary.
+
+[[center]]
+type = "custom"
+name = "gcal-next"
+
+[[center.bar]]
+type = "button"
+on_click = "popup:toggle"
+
+[[center.bar.widgets]]
+type = "label"
+label = "#gcal_next_pill"
+
+# The background process; shows nothing. A script module (not a `{{watch:…}}`
+# label) because Ironbar stops those on reload, and keeps one per command
+# even with a bar per monitor.
+[[center.bar.widgets]]
+type = "script"
+class = "gcal-next-daemon"
+mode = "watch"
+cmd = "cosmic-ext-applet-gcal-next --ironbar"
+
+[[center.popup]]
+type = "box"
+orientation = "vertical"
+name = "gcal-next-popup"
+
+# Fixed widths: changing texts must not resize (and re-center) the popup.
+[[center.popup.widgets]]
+type = "label"
+name = "gcal-next-title"
+label = "#gcal_next_title"
+truncate = { mode = "end", length = 36, max_length = 36 }
+
+[[center.popup.widgets]]
+type = "label"
+label = "#gcal_next_time"
+truncate = { mode = "end", length = 36, max_length = 36 }
+
+# Buttons, centered; their labels are colored chips.
+[[center.popup.widgets]]
+type = "box"
+halign = "center"
+
+[[center.popup.widgets.widgets]]
+type = "button"
+label = "#gcal_next_join"
+on_click = "!cosmic-ext-applet-gcal-next --join"
+
+[[center.popup.widgets.widgets]]
+type = "button"
+label = "#gcal_next_refresh"
+on_click = "!cosmic-ext-applet-gcal-next --refresh"
+
+[[center.popup.widgets.widgets]]
+type = "button"
+label = "#gcal_next_settings"
+on_click = "!cosmic-ext-applet-gcal-next --settings"
+
+[[center.popup.widgets]]
+type = "label"
+class = "gcal-next-caption"
+label = "#gcal_next_sync"
+truncate = { mode = "end", length = 36, max_length = 36 }

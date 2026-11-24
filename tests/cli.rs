@@ -79,3 +79,86 @@ fn missing_file_is_error_state() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "error !");
 }
+
+#[test]
+fn details_against_fixture() {
+    let details = |now: &str| {
+        let output = command()
+            .args([
+                "--details",
+                "--ics-file",
+                "tests/fixtures/google.ics",
+                "--now",
+                now,
+            ])
+            .env("TZ", "Europe/Berlin")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(
+        details("2026-11-10T09:55:00+01:00"),
+        "Daily standup\n10:00 – 10:15"
+    );
+    assert_eq!(
+        details("2026-11-10T16:40:00+01:00"),
+        "No meeting in the next 2h"
+    );
+}
+
+/// `--ironbar` publishes the pill and the popup texts over Ironbar's IPC
+/// socket (a fake one here).
+#[test]
+fn ironbar_publishes_variables() {
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader, Write},
+        os::unix::net::UnixListener,
+        time::{Duration, Instant},
+    };
+
+    let runtime = std::env::temp_dir().join(concat!(env!("CARGO_PKG_NAME"), "-ipc-test"));
+    let _ = std::fs::remove_dir_all(&runtime);
+    std::fs::create_dir_all(&runtime).unwrap();
+    let listener = UnixListener::bind(runtime.join("ironbar-ipc.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let mut child = command()
+        .args(["--ironbar", "--ics-file", "tests/fixtures/google.ics"])
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut vars = HashMap::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !(vars.contains_key("gcal_next_pill") && vars.contains_key("gcal_next_settings")) {
+        assert!(Instant::now() < deadline, "timed out, got {vars:?}");
+        let Ok((stream, _)) = listener.accept() else {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        };
+        stream.set_nonblocking(false).unwrap();
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).unwrap();
+        (&stream).write_all(b"{\"type\":\"ok\"}\n").unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["command"], "var");
+        assert_eq!(request["subcommand"], "set");
+        vars.insert(
+            request["key"].as_str().unwrap().to_owned(),
+            request["value"].as_str().unwrap().to_owned(),
+        );
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let pill = &vars["gcal_next_pill"];
+    assert!(
+        pill.starts_with("<span background=\"#") && pill.ends_with(" </span>"),
+        "{pill}"
+    );
+    assert!(vars["gcal_next_settings"].contains("Settings…"));
+    let _ = std::fs::remove_dir_all(&runtime);
+}

@@ -4,7 +4,7 @@ pub mod fetch;
 pub mod ics;
 pub mod links;
 
-use std::{path::PathBuf, time::SystemTime};
+use std::{path::PathBuf, sync::Arc, time::SystemTime};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -125,6 +125,46 @@ impl std::fmt::Debug for IcsSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IcsSource").finish_non_exhaustive()
     }
+}
+
+/// The feed: `ics_file` if given (testing; never touches the real cache),
+/// else the secret URL with the disk cache.
+pub async fn make_source(ics_file: Option<PathBuf>, local: rrule::Tz) -> Result<IcsSource> {
+    let (location, cache) = match ics_file {
+        Some(path) => (Location::File(path), None),
+        None => (
+            Location::Url(crate::config::load_secret_url().await?),
+            crate::config::cache_path(),
+        ),
+    };
+    Ok(IcsSource::new(fetch::Fetcher::new(location, cache)?, local))
+}
+
+/// One fetch for [`crate::state::expansion_window`]. `source` is built on
+/// first use (and returned for reuse), so the URL is re-read until it works
+/// and setting it up needs no restart.
+pub async fn fetch_snapshot(
+    source: Option<Arc<IcsSource>>,
+    ics_file: Option<PathBuf>,
+    local: rrule::Tz,
+) -> (Option<Arc<IcsSource>>, Result<Snapshot, String>) {
+    let source = match source {
+        Some(source) => source,
+        None => match make_source(ics_file, local).await {
+            Ok(source) => Arc::new(source),
+            Err(err) => return (None, Err(format!("{err:#}"))),
+        },
+    };
+    let (from, to) = crate::state::expansion_window(Utc::now());
+    let result = source
+        .events(from, to)
+        .await
+        .map(|events| Snapshot {
+            events,
+            fetched_at: SystemTime::now(),
+        })
+        .map_err(|err| format!("{err:#}"));
+    (Some(source), result)
 }
 
 /// Events from the cache file at `path`, without needing the feed URL.

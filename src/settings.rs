@@ -1,20 +1,20 @@
-//! The popup's settings page and how its changes are saved.
+//! The settings page (COSMIC popup and the `--settings` window) and how its
+//! changes are saved.
 //!
 //! Every change is written to cosmic-config right away (the same files that
-//! can be edited by hand) and applied through [`App::apply_config`].
+//! can be edited by hand); the owner applies the new config.
 
-use chrono::TimeDelta;
+use std::collections::HashMap;
+
 use cosmic::{
     Element,
-    app::Task,
-    cosmic_config::ConfigSet,
+    cosmic_config::{self, ConfigSet, CosmicConfigEntry as _},
     iced::{Alignment, Border, Length, Padding},
-    widget::{self, button, container, icon, mouse_area, settings, spin_button, text, toggler},
+    widget::{self, button, container, icon, mouse_area, settings, text, toggler},
 };
 
-use super::{App, Message};
 use crate::{
-    config::{self, ColorSpec, Config, ResolvedStyle, Style, ThemeColor, ThemeName, Tier},
+    config::{self, APP_ID, ColorSpec, Config, ResolvedStyle, Style, ThemeColor, ThemeName, Tier},
     format, state, style,
 };
 
@@ -22,6 +22,9 @@ use crate::{
 /// up to a week.
 const LOOKAHEAD_STEP_MIN: u32 = 30;
 const LOOKAHEAD_UI_MAX_MIN: u32 = 24 * 60;
+
+/// Label width of the +/− controls; fits `≤ 10h 45m`.
+const STEPPER_LABEL_WIDTH: f32 = 76.0;
 
 /// Thresholds offered for warning levels (minutes). Values set by hand in the
 /// config file are kept until changed here.
@@ -39,7 +42,20 @@ pub enum Target {
     Ongoing,
 }
 
-/// A setting changed in the popup.
+/// The settings page's state: the config it shows and fields being edited.
+pub struct SettingsState {
+    /// The current config; kept in sync by the owner (watcher updates).
+    pub config: Config,
+    /// Writes changes; `None` if cosmic-config is unavailable (changes then
+    /// only last until restart).
+    handler: Option<cosmic_config::Config>,
+    /// The e-mail field while it is being edited.
+    email_draft: String,
+    /// Custom color fields while they are being edited.
+    hex_drafts: HashMap<Target, String>,
+}
+
+/// A setting changed on the page.
 #[derive(Debug, Clone)]
 pub enum Setting {
     EmailInput(String),
@@ -135,11 +151,29 @@ fn new_tier_threshold(tiers: &[Tier]) -> u32 {
         .unwrap_or_else(|| tiers.iter().map(|t| t.within_min).max().unwrap_or(0) + 30)
 }
 
-impl App {
-    /// Persist one key; the watcher's echo of it is a no-op because
-    /// `apply_config` already took the new value.
+impl SettingsState {
+    pub fn new(config: Config) -> Self {
+        let email_draft = config.my_email.clone().unwrap_or_default();
+        Self {
+            config,
+            handler: cosmic_config::Config::new(APP_ID, Config::VERSION)
+                .inspect_err(|err| tracing::warn!("settings cannot be saved: {err}"))
+                .ok(),
+            email_draft,
+            hex_drafts: HashMap::new(),
+        }
+    }
+
+    /// Start editing afresh (the page was opened).
+    pub fn reset_drafts(&mut self) {
+        self.email_draft = self.config.my_email.clone().unwrap_or_default();
+        self.hex_drafts.clear();
+    }
+
+    /// Persist one key; the watcher's echo of it is a no-op because the
+    /// owner already took the new value.
     fn write_key<T: serde::Serialize>(&self, key: &str, value: T) {
-        let Some(handler) = &self.config_handler else {
+        let Some(handler) = &self.handler else {
             return;
         };
         if let Err(err) = handler.set(key, value) {
@@ -156,27 +190,29 @@ impl App {
     }
 
     /// Save text fields that are still being edited (popup closed or page
-    /// left without pressing Enter).
-    pub(super) fn save_drafts(&mut self) -> Task<Message> {
-        let mut tasks = vec![self.change_setting(Setting::SaveEmail)];
+    /// left without pressing Enter). Returns whether the config changed.
+    pub fn save_drafts(&mut self) -> bool {
+        let mut changed = self.change(Setting::SaveEmail);
         let targets: Vec<Target> = self.hex_drafts.keys().copied().collect();
         for target in targets {
-            tasks.push(self.change_setting(Setting::SaveHex(target)));
+            changed |= self.change(Setting::SaveHex(target));
         }
-        Task::batch(tasks)
+        changed
     }
 
-    pub(super) fn change_setting(&mut self, setting: Setting) -> Task<Message> {
+    /// Apply and save one change. Returns whether `self.config` changed (the
+    /// owner then applies it).
+    pub fn change(&mut self, setting: Setting) -> bool {
         let mut config = self.config.clone();
         match setting {
             Setting::EmailInput(value) => {
                 self.email_draft = value;
-                return Task::none();
+                return false;
             }
             Setting::SaveEmail => {
                 let email = Some(self.email_draft.trim().to_owned()).filter(|e| !e.is_empty());
                 if email == config.my_email {
-                    return Task::none();
+                    return false;
                 }
                 self.write_key("my_email", &email);
                 config.my_email = email;
@@ -209,14 +245,14 @@ impl App {
             }
             Setting::TierStep(index, step) => {
                 let Some(minutes) = free_threshold(&config.tiers, index, step) else {
-                    return Task::none();
+                    return false;
                 };
                 config.tiers[index].within_min = minutes;
                 self.write_key("tiers", &config.tiers);
             }
             Setting::ThemeColor(target, color) => {
                 let Some(style) = style_mut(&mut config, target) else {
-                    return Task::none();
+                    return false;
                 };
                 style.color = ColorSpec::Theme(ThemeName::from(color));
                 self.hex_drafts.remove(&target);
@@ -224,26 +260,26 @@ impl App {
             }
             Setting::HexInput(target, value) => {
                 self.hex_drafts.insert(target, value);
-                return Task::none();
+                return false;
             }
             Setting::SaveHex(target) => {
                 let Some(draft) = self.hex_drafts.get(&target) else {
-                    return Task::none();
+                    return false;
                 };
                 // Invalid or empty input stays in the field, nothing is saved.
                 let Some(rgba) = config::parse_hex(draft) else {
-                    return Task::none();
+                    return false;
                 };
                 self.hex_drafts.remove(&target);
                 let Some(style) = style_mut(&mut config, target) else {
-                    return Task::none();
+                    return false;
                 };
                 style.color = ColorSpec::Rgba(hex_string(rgba));
                 self.write_style(&config, target);
             }
             Setting::Pulse(target, value) => {
                 let Some(style) = style_mut(&mut config, target) else {
-                    return Task::none();
+                    return false;
                 };
                 style.pulse = value;
                 self.write_style(&config, target);
@@ -261,7 +297,7 @@ impl App {
             }
             Setting::RemoveTier(index) => {
                 if index >= config.tiers.len() {
-                    return Task::none();
+                    return false;
                 }
                 config.tiers.remove(index);
                 // Draft keys are tier indices, which just shifted.
@@ -279,22 +315,16 @@ impl App {
                 self.write_key("ongoing", &config.ongoing);
             }
         }
-        self.apply_config(config)
+        let changed = config != self.config;
+        self.config = config;
+        changed
     }
 
-    /// The settings page of the popup.
-    pub(super) fn settings_page(&self) -> Element<'_, Message> {
+    /// The sections and the reset button (the owner adds a header and
+    /// scrolling).
+    pub fn view(&self) -> Element<'_, Setting> {
         let spacing = cosmic::theme::active().cosmic().spacing;
-        let header = widget::Row::new()
-            .spacing(spacing.space_xs)
-            .align_y(Alignment::Center)
-            .push(
-                button::icon(icon::from_name("go-previous-symbolic"))
-                    .on_press(Message::ShowSettings(false)),
-            )
-            .push(text::title4("Settings"));
-
-        let body = widget::Column::new()
+        widget::Column::new()
             .spacing(spacing.space_m)
             // Room for the scroll bar.
             .padding(Padding {
@@ -304,20 +334,11 @@ impl App {
             .push(self.general_section())
             .push(self.levels_section())
             .push(self.states_section())
-            .push(
-                button::standard("Reset levels and colors")
-                    .on_press(Message::Setting(Setting::ResetAppearance)),
-            );
-
-        widget::Column::new()
-            .spacing(spacing.space_s)
-            .padding([spacing.space_s, spacing.space_m])
-            .push(header)
-            .push(container(widget::scrollable(body)).max_height(560.0))
+            .push(button::standard("Reset levels and colors").on_press(Setting::ResetAppearance))
             .into()
     }
 
-    fn general_section(&self) -> Element<'_, Message> {
+    fn general_section(&self) -> Element<'_, Setting> {
         let cfg = &self.config;
         let minutes = (cfg.refresh_interval_secs.max(30) + 30) / 60;
         let lookahead = cfg.lookahead_min.clamp(1, state::MAX_LOOKAHEAD_MIN);
@@ -327,9 +348,9 @@ impl App {
             .push(text::body("Your e-mail (to skip declined meetings)"))
             .push(
                 widget::text_input("you@example.com", self.email_draft.as_str())
-                    .on_input(|v| Message::Setting(Setting::EmailInput(v)))
-                    .on_submit(|_| Message::Setting(Setting::SaveEmail))
-                    .on_unfocus(Message::Setting(Setting::SaveEmail)),
+                    .on_input(Setting::EmailInput)
+                    .on_submit(|_| Setting::SaveEmail)
+                    .on_unfocus(Setting::SaveEmail),
             );
 
         settings::section()
@@ -337,44 +358,46 @@ impl App {
             .add(email)
             .add(settings::item(
                 "Refresh every",
-                spin_button(format!("{minutes} min"), minutes.max(1), 1, 1, 60, |m| {
-                    Message::Setting(Setting::RefreshMinutes(m))
-                }),
+                stepper(
+                    format!("{minutes} min"),
+                    minutes.max(1),
+                    1,
+                    1,
+                    60,
+                    Setting::RefreshMinutes,
+                ),
             ))
             .add(settings::item(
                 "Look ahead",
-                spin_button(
-                    format::remaining(TimeDelta::minutes(i64::from(lookahead))),
+                stepper(
+                    format::compact(lookahead),
                     lookahead,
                     LOOKAHEAD_STEP_MIN,
                     LOOKAHEAD_STEP_MIN,
                     LOOKAHEAD_UI_MAX_MIN.max(lookahead),
-                    |m| Message::Setting(Setting::LookaheadMinutes(m)),
+                    Setting::LookaheadMinutes,
                 ),
             ))
             .add(settings::item(
                 "Skip all-day events",
-                toggler(cfg.skip_all_day).on_toggle(|v| Message::Setting(Setting::SkipAllDay(v))),
+                toggler(cfg.skip_all_day).on_toggle(Setting::SkipAllDay),
             ))
             .add(settings::item(
                 "Skip declined meetings",
-                toggler(cfg.skip_declined)
-                    .on_toggle(|v| Message::Setting(Setting::SkipDeclined(v))),
+                toggler(cfg.skip_declined).on_toggle(Setting::SkipDeclined),
             ))
             .add(settings::item(
                 "Skip events marked free",
-                toggler(cfg.skip_transparent)
-                    .on_toggle(|v| Message::Setting(Setting::SkipTransparent(v))),
+                toggler(cfg.skip_transparent).on_toggle(Setting::SkipTransparent),
             ))
             .add(settings::item(
                 "Pulsing (all levels)",
-                toggler(cfg.pulse_enabled)
-                    .on_toggle(|v| Message::Setting(Setting::PulseEnabled(v))),
+                toggler(cfg.pulse_enabled).on_toggle(Setting::PulseEnabled),
             ))
             .into()
     }
 
-    fn levels_section(&self) -> Element<'_, Message> {
+    fn levels_section(&self) -> Element<'_, Setting> {
         let tiers = &self.config.tiers;
         let mut order: Vec<usize> = (0..tiers.len()).collect();
         order.sort_by_key(|&i| tiers[i].within_min);
@@ -387,23 +410,20 @@ impl App {
             .add(
                 button::text("Add level")
                     .leading_icon(icon::from_name("list-add-symbolic"))
-                    .on_press(Message::Setting(Setting::AddTier)),
+                    .on_press(Setting::AddTier),
             )
             .into()
     }
 
-    fn tier_editor(&self, index: usize) -> Element<'_, Message> {
+    fn tier_editor(&self, index: usize) -> Element<'_, Setting> {
         let tier = &self.config.tiers[index];
-        let threshold = spin_button(
-            format!(
-                "≤ {}",
-                format::remaining(TimeDelta::minutes(i64::from(tier.within_min)))
-            ),
+        let threshold = stepper(
+            format!("≤ {}", format::compact(tier.within_min)),
             nearest_step(tier.within_min),
             1,
             0,
             TIER_STEPS.len() - 1,
-            move |step| Message::Setting(Setting::TierStep(index, step)),
+            move |step| Setting::TierStep(index, step),
         );
         // Tight spacing: this row nearly fills the popup's fixed width.
         let top = widget::Row::new()
@@ -414,7 +434,7 @@ impl App {
             .push(self.pulse_toggle(Target::Tier(index), tier.style.pulse))
             .push(
                 button::icon(icon::from_name("user-trash-symbolic"))
-                    .on_press(Message::Setting(Setting::RemoveTier(index))),
+                    .on_press(Setting::RemoveTier(index)),
             );
         widget::Column::new()
             .spacing(6)
@@ -423,7 +443,7 @@ impl App {
             .into()
     }
 
-    fn states_section(&self) -> Element<'_, Message> {
+    fn states_section(&self) -> Element<'_, Setting> {
         let state_editor = |label: &'static str, target: Target, pulse: bool| {
             widget::Column::new()
                 .spacing(6)
@@ -452,17 +472,17 @@ impl App {
             .into()
     }
 
-    fn pulse_toggle(&self, target: Target, pulse: bool) -> Element<'_, Message> {
+    fn pulse_toggle(&self, target: Target, pulse: bool) -> Element<'_, Setting> {
         widget::Row::new()
             .spacing(4)
             .align_y(Alignment::Center)
             .push(text::caption("Pulse"))
-            .push(toggler(pulse).on_toggle(move |v| Message::Setting(Setting::Pulse(target, v))))
+            .push(toggler(pulse).on_toggle(move |v| Setting::Pulse(target, v)))
             .into()
     }
 
     /// Theme color swatches plus a field for a custom `#RRGGBB` color.
-    fn color_row(&self, target: Target) -> Element<'_, Message> {
+    fn color_row(&self, target: Target) -> Element<'_, Setting> {
         let Some(style) = style_of(&self.config, target) else {
             return widget::Space::new().into();
         };
@@ -475,7 +495,7 @@ impl App {
             row = row.push(swatch(
                 color,
                 selected == Some(color),
-                Message::Setting(Setting::ThemeColor(target, color)),
+                Setting::ThemeColor(target, color),
             ));
         }
         let hex = self
@@ -489,16 +509,55 @@ impl App {
         row.push(
             widget::text_input("#RRGGBB", hex)
                 .width(Length::Fixed(96.0))
-                .on_input(move |v| Message::Setting(Setting::HexInput(target, v)))
-                .on_submit(move |_| Message::Setting(Setting::SaveHex(target)))
-                .on_unfocus(Message::Setting(Setting::SaveHex(target))),
+                .on_input(move |v| Setting::HexInput(target, v))
+                .on_submit(move |_| Setting::SaveHex(target))
+                .on_unfocus(Setting::SaveHex(target)),
         )
         .into()
     }
 }
 
+/// Like libcosmic's `spin_button` (− label +), but with room for labels like
+/// `≤ 1h 30m`: its label slot is a fixed 48 px, so they wrapped.
+fn stepper<'a, T>(
+    label: String,
+    value: T,
+    step: T,
+    min: T,
+    max: T,
+    on_change: impl Fn(T) -> Setting,
+) -> Element<'a, Setting>
+where
+    T: Copy + PartialOrd + std::ops::Add<Output = T> + std::ops::Sub<Output = T>,
+{
+    let decrement = (value > min).then(|| {
+        on_change(if value - min < step {
+            min
+        } else {
+            value - step
+        })
+    });
+    let increment = (value < max).then(|| {
+        on_change(if max - value < step {
+            max
+        } else {
+            value + step
+        })
+    });
+    widget::Row::new()
+        .align_y(Alignment::Center)
+        .push(button::icon(icon::from_name("list-remove-symbolic")).on_press_maybe(decrement))
+        .push(
+            container(text::body(label))
+                .center_x(Length::Fixed(STEPPER_LABEL_WIDTH))
+                .align_y(Alignment::Center),
+        )
+        .push(button::icon(icon::from_name("list-add-symbolic")).on_press_maybe(increment))
+        .into()
+}
+
 /// A round, clickable sample of a theme color; the selected one is ringed.
-fn swatch<'a>(color: ThemeColor, selected: bool, on_press: Message) -> Element<'a, Message> {
+fn swatch<'a>(color: ThemeColor, selected: bool, on_press: Setting) -> Element<'a, Setting> {
     let style = ResolvedStyle {
         color: config::Color::Theme(color),
         pulse: false,

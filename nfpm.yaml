@@ -5,7 +5,7 @@ platform: linux
 version: ${VERSION} # from the git tag / Cargo.toml, without the leading "v"
 release: 1 # bump only for packaging-only fixes
 maintainer: Philipp Krones <hello@philkrones.com>
-description: Minimal COSMIC panel applet showing the time to your next Google Calendar meeting
+description: Minimal COSMIC panel applet (or Ironbar module) showing the time to your next Google Calendar meeting
 homepage: https://github.com/flip1995/cosmic-ext-applet-gcal-next
 license: MIT OR Apache-2.0
 
@@ -13,12 +13,16 @@ license: MIT OR Apache-2.0
 # `ldd target/release/…` + `pacman -Qo`, plus the dlopen()ed libwayland-client.
 # Re-check when bumping libcosmic; namcap in release.yml flags gaps.
 depends:
-  - cosmic-panel
   - glibc
   - hicolor-icon-theme # owns the icon directories we install into
   - libgcc
   - libxkbcommon
   - wayland
+
+# Written as `optdepend` lines for archlinux; quoted, or YAML reads a mapping.
+suggests:
+  - "cosmic-panel: run as a COSMIC panel applet"
+  - "ironbar: run as an Ironbar module (--ironbar)"
 
 archlinux:
   packager: Philipp Krones <hello@philkrones.com>
@@ -34,6 +38,10 @@ contents:
       mode: 0644
   - src: resources/icon.svg
     dst: /usr/share/icons/hicolor/scalable/apps/io.github.flip1995.CosmicExtAppletGcalNext.svg
+    file_info:
+      mode: 0644
+  - src: resources/ironbar.toml
+    dst: /usr/share/doc/cosmic-ext-applet-gcal-next/ironbar.toml
     file_info:
       mode: 0644
   - src: LICENSE-MIT

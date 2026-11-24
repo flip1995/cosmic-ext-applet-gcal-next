@@ -14,18 +14,21 @@
 A minimal COSMIC panel applet: one pill showing the time until the next
 meeting from **one** Google Calendar, colored by urgency and optionally
 pulsing. Clicking it opens a popup with details, *Join*, *Refresh now* and a
-settings page.
+settings page. The same binary also runs as an Ironbar module (`--ironbar`).
 
 ## Layout
 
 | File | Role |
 |------|------|
-| `src/main.rs` | CLI (`--once`, `--ics-file`, `--now`, `--set-url`, `--print-default-config`); no args runs the applet |
+| `src/main.rs` | CLI (`--once`, `--ironbar`, `--settings`, `--join`, `--details`, `--refresh`, `--get`/`--set [--step]`/`--toggle`, `--ics-file`, `--now`, `--set-url`, `--print-default-config`); no args runs the applet |
 | `src/app.rs` | `cosmic::Application`: pill view, popup, subscriptions, fetch scheduling |
-| `src/app/settings.rs` | Popup settings page; writes changes via cosmic-config |
+| `src/settings.rs` | `SettingsState`: the settings page (view + saving via cosmic-config), used by the popup and the window |
+| `src/settings_window.rs` | `--settings`: the settings page as a standalone libcosmic window |
+| `src/ironbar.rs` | Ironbar mode: headless fetch/tick loop publishing the pill and popup texts as ironvars over IPC, plus the button helpers |
+| `resources/ironbar.toml` | Ironbar `custom` module (pill + popup) wired to the CLI |
 | `src/config.rs` | `Config` (`CosmicConfigEntry`), defaults, tier validation, secret URL loading (file / keyring) |
 | `src/state.rs` | **Pure** `(events, now, config) -> DisplayState` |
-| `src/format.rs` | **Pure** labels (`1h 20m`, `25m`) |
+| `src/format.rs` | **Pure** labels (`1h 20m`, `2h`, `25m`) |
 | `src/style.rs` | Theme color resolution, pulse alpha |
 | `src/source/ics.rs` | Own forgiving ICS parser + recurrence expansion (`rrule`) |
 | `src/source/fetch.rs` | HTTPS/file fetch, 0600 disk cache, backoff |
@@ -55,7 +58,9 @@ Keep `state.rs`, `format.rs` and `source/` free of UI code, and never call
   `ongoing_grace_min` (5) after its start, then the next one shows. Only
   meetings starting within `lookahead_min` (120) count — this replaced the
   original "rest of today" cutoff. Tentative meetings count.
-- **Labels round up** (59 s → `1m`, never `0m`). **Tiers use "at most N"**
+- **Labels round up** (59 s → `1m`, never `0m`). Zero parts are left out
+  (`2h`, `1h 30m`); a fixed `0h 05m` form was tried and dropped.
+  **Tiers use "at most N"**
   (`within_min`) against that rounded value, so color and text always agree
   and `1` means the last minute. (Originally "below N"; a 1-minute tier could
   never match.)
@@ -82,6 +87,46 @@ Keep `state.rs`, `format.rs` and `source/` free of UI code, and never call
 - **Pulse** only subscribes to animation frames while the current state
   pulses; `pulse_enabled` is a global kill switch.
 - **Vertical panels** show a colored dot.
+- **Ironbar** (`--ironbar`): a tokio loop with the applet's fetch timing
+  (refresh interval, backoff, resume detection, disk cache). It publishes
+  the pill (Pango markup, `gcal_next_pill`) and the popup texts
+  (`popup_vars`, pure) as ironvars by writing JSON to
+  `$XDG_RUNTIME_DIR/ironbar-ipc.sock`. That is cheap enough for the ~10/s
+  pulse; it publishes only on change, coalescing per key. It publishes
+  nothing until there's a cache or a first fetch, so there's no `!` flash.
+  Colors come from `style::pill_colors` with
+  `cosmic::theme::system_preference()`. The buttons are Pango "chips" in
+  theme colors, since Ironbar's default styling makes plain buttons look
+  like text.
+  - **Process lifetime (Ironbar v0.19 source):**
+    - `{{watch:…}}` and polling scripts in dynamic strings are never killed,
+      even on reload; Ironbar keeps their pipes open.
+    - A `script` module's watch process *is* killed when another script
+      module registers the same `cmd`.
+    - So `resources/ironbar.toml` hides a script module in the bar button.
+      Reloads and the per-monitor copies leave exactly one `--ironbar`.
+      Every bar shows `#gcal_next_pill` via a label.
+    - The process prints nothing and exits when its stdout gets
+      POLLERR/POLLHUP (Ironbar gone). No PDEATHSIG: it fires on the
+      parent *thread*'s exit.
+  - **Popup:** labels have fixed widths (`truncate.length` =
+    `max_length`), since a resize re-centers the popup under the cursor.
+    (That's also why the Ironbar slider went: every drag step resized it.)
+  - **Settings:** Ironbar's custom widgets have no text inputs or color
+    pickers, so *Settings…* runs `--settings`: the same `SettingsState` page
+    as the COSMIC popup, in a libcosmic window (own app ID,
+    single-instance). There are also `--get`/`--set [--step N]`/`--toggle`
+    for scripts. `config::for_each_key!` lists the keys once.
+  - **Ironbar quirks:**
+    - a label containing `<span` is used verbatim as markup, anything else is
+      escaped;
+    - `#` in config strings starts a variable;
+    - `!cmd` and `{{…}}` run through `/bin/sh -c` after a shorthand parser
+      that eats a leading `poll:`/`watch:`/digits prefix.
+  - **Helpers:** `--join`/`--details` compute from the disk cache, never the
+    network. `--refresh` SIGUSR1s `--ironbar` (found via `/proc/*/cmdline`,
+    argv0 basename plus flag). The handler is installed first, since
+    SIGUSR1's default is to terminate.
 - **IDs:** app ID `io.github.flip1995.CosmicExtAppletGcalNext`, repo
   `flip1995/cosmic-ext-applet-gcal-next`, maintainer
   `Philipp Krones <hello@philkrones.com>`.
@@ -89,6 +134,7 @@ Keep `state.rs`, `format.rs` and `source/` free of UI code, and never call
 ## Packaging and releases
 
 - Arch package via **nFPM** (`nfpm.yaml`, `just package`), not a PKGBUILD.
+  `cosmic-panel` and `ironbar` are optdepends (nFPM `suggests`).
   `depends` is maintained by hand (from `ldd` + `pacman -Qo`, plus the
   dlopen()ed `wayland`, and `hicolor-icon-theme` for the icon directories);
   re-check when bumping libcosmic. namcap in the release

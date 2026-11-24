@@ -14,6 +14,8 @@ color as the meeting approaches and pulses when it is imminent.
   lookahead, filters, and the warning levels with their thresholds, colors and
   pulsing.
 - On vertical panels the pill becomes a colored dot.
+- Not on COSMIC? The same binary also runs as an [Ironbar](#ironbar) module,
+  with the settings in a window.
 
 See [`CLAUDE.md`](CLAUDE.md) for an overview of the implementation and the
 design decisions.
@@ -29,7 +31,8 @@ sudo pacman -U https://github.com/flip1995/cosmic-ext-applet-gcal-next/releases/
 
 From source (user-local, `~/.local`): `just install`.
 
-Then add **Next Meeting** in *Settings → Desktop → Panel → Applets*.
+Then add **Next Meeting** in *Settings → Desktop → Panel → Applets* (COSMIC),
+or see [Ironbar](#ironbar).
 
 ## Setup
 
@@ -55,12 +58,46 @@ Then add **Next Meeting** in *Settings → Desktop → Panel → Applets*.
    ```
 
 3. Optionally set your e-mail address so events you declined are skipped
-   (or enter it in the popup's *Settings…* page):
+   (or enter it in the COSMIC popup's *Settings…* page):
 
    ```sh
-   mkdir -p ~/.config/cosmic/io.github.flip1995.CosmicExtAppletGcalNext/v1
-   echo 'Some("you@example.com")' > ~/.config/cosmic/io.github.flip1995.CosmicExtAppletGcalNext/v1/my_email
+   cosmic-ext-applet-gcal-next --set my_email you@example.com
    ```
+
+## Ironbar
+
+On other Wayland compositors (Hyprland, Sway, niri, …) the binary works as an
+[Ironbar](https://github.com/JakeStanger/ironbar) module. You get the same pill,
+and clicking it opens a popup with:
+- the meeting's title and time;
+- *Join*, *Refresh now* and *Settings…*;
+- the sync status.
+
+*Settings…* opens the full settings page (the same one as in COSMIC) in a
+window: `cosmic-ext-applet-gcal-next --settings`.
+
+Append [`resources/ironbar.toml`](resources/ironbar.toml) to
+`~/.config/ironbar/config.toml`. The package installs it as
+`/usr/share/doc/cosmic-ext-applet-gcal-next/ironbar.toml`.
+
+How it works:
+- A hidden `script` module runs one `--ironbar` background process (Ironbar
+  stops it on reload).
+- That process publishes the pill and the popup's texts as Ironbar variables
+  (`gcal_next_*`) over Ironbar's IPC socket. Every bar (monitor) shows them.
+- The buttons call `--join`, `--refresh` and `--settings`.
+
+Notes:
+- **Colors:** theme colors come from the COSMIC theme if one is configured,
+  otherwise COSMIC's default dark theme. Use `Rgba("#…")` colors to match
+  your bar.
+- **Shape:** Pango has no rounded corners or padding; style the module with
+  CSS (`#gcal-next`, `#gcal-next-popup`, `#gcal-next-title`,
+  `.gcal-next-caption`).
+- **Settings window:** it has its own app ID,
+  `io.github.flip1995.CosmicExtAppletGcalNext.Settings`, e.g. for a Hyprland
+  rule to float it.
+- **Cache:** `--join` reads only the disk cache, never the network.
 
 ## Usage
 
@@ -68,6 +105,11 @@ Then add **Next Meeting** in *Settings → Desktop → Panel → Applets*.
 cosmic-ext-applet-gcal-next --once                  # print `state label | title | start`
 cosmic-ext-applet-gcal-next --once --ics-file f.ics --now 2026-11-10T10:00:00+01:00
 cosmic-ext-applet-gcal-next --print-default-config  # the default settings
+cosmic-ext-applet-gcal-next --settings              # the settings in a window
+cosmic-ext-applet-gcal-next --ironbar               # Ironbar mode, see above
+cosmic-ext-applet-gcal-next --set lookahead_min 180 # change a setting (live)
+cosmic-ext-applet-gcal-next --toggle skip_all_day   # flip an on/off setting
+cosmic-ext-applet-gcal-next --get lookahead_min
 ```
 
 Set `RUST_LOG=debug` for more log output (on stderr).

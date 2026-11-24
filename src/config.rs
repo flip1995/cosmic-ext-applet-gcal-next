@@ -263,6 +263,11 @@ impl Config {
         })
     }
 
+    /// Time between successful fetches (at least 30 s).
+    pub fn refresh_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.refresh_interval_secs.max(30))
+    }
+
     /// Validate the appearance settings. Invalid entries are skipped (fixed
     /// states fall back to their default) and reported in the returned
     /// warnings.
@@ -326,6 +331,199 @@ fn xdg_dir(var: &str, fallback: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::home_dir().map(|home| home.join(fallback)))
+}
+
+/// Calls `$m!` with every settings key and its type.
+macro_rules! for_each_key {
+    ($m:ident) => {
+        $m! {
+            refresh_interval_secs: u64,
+            ongoing_grace_min: u32,
+            lookahead_min: u32,
+            skip_all_day: bool,
+            skip_declined: bool,
+            my_email: Option<String>,
+            skip_transparent: bool,
+            skip_zero_duration: bool,
+            stale_after_min: u32,
+            tiers: Vec<Tier>,
+            far: Style,
+            ongoing: Style,
+            none: Style,
+            error: Style,
+            none_label: String,
+            ongoing_label: String,
+            pulse_enabled: bool,
+            pulse_period_ms: u32,
+            pulse_min_alpha: f32,
+        }
+    };
+}
+pub(crate) use for_each_key;
+
+/// A setting as given to / printed by `--set` and `--get`: plain text for
+/// scalars (numbers may have a fraction, as Ironbar sliders pass them), RON
+/// for the structured appearance keys.
+trait CliValue: Sized {
+    fn parse_cli(s: &str) -> Result<Self>;
+    fn to_cli(&self) -> String;
+}
+
+macro_rules! cli_integer {
+    ($($ty:ty),*) => {$(
+        impl CliValue for $ty {
+            fn parse_cli(s: &str) -> Result<Self> {
+                let n: f64 = s.trim().parse().with_context(|| format!("`{s}` is not a number"))?;
+                if !n.is_finite() || n < 0.0 || n.round() > <$ty>::MAX as f64 {
+                    bail!("`{s}` is out of range");
+                }
+                Ok(n.round() as $ty)
+            }
+            fn to_cli(&self) -> String {
+                self.to_string()
+            }
+        }
+    )*};
+}
+cli_integer!(u32, u64);
+
+impl CliValue for f32 {
+    fn parse_cli(s: &str) -> Result<Self> {
+        let n: f32 = s
+            .trim()
+            .parse()
+            .with_context(|| format!("`{s}` is not a number"))?;
+        if !n.is_finite() {
+            bail!("`{s}` is not a number");
+        }
+        Ok(n)
+    }
+    fn to_cli(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl CliValue for bool {
+    fn parse_cli(s: &str) -> Result<Self> {
+        match s.trim() {
+            "true" | "on" | "yes" | "1" => Ok(true),
+            "false" | "off" | "no" | "0" => Ok(false),
+            _ => bail!("`{s}` is not on/off"),
+        }
+    }
+    fn to_cli(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl CliValue for String {
+    fn parse_cli(s: &str) -> Result<Self> {
+        Ok(s.to_owned())
+    }
+    fn to_cli(&self) -> String {
+        self.clone()
+    }
+}
+
+/// Empty means unset.
+impl CliValue for Option<String> {
+    fn parse_cli(s: &str) -> Result<Self> {
+        let s = s.trim();
+        Ok((!s.is_empty()).then(|| s.to_owned()))
+    }
+    fn to_cli(&self) -> String {
+        self.clone().unwrap_or_default()
+    }
+}
+
+macro_rules! cli_ron {
+    ($($ty:ty),*) => {$(
+        impl CliValue for $ty {
+            fn parse_cli(s: &str) -> Result<Self> {
+                ron::from_str(s).with_context(|| format!("invalid value `{s}`"))
+            }
+            fn to_cli(&self) -> String {
+                ron::to_string(self).unwrap_or_default()
+            }
+        }
+    )*};
+}
+cli_ron!(Vec<Tier>, Style);
+
+fn config_handler() -> Result<cosmic_config::Config> {
+    cosmic_config::Config::new(APP_ID, Config::VERSION).context("cannot open the settings")
+}
+
+/// `--set KEY VALUE [--step N]`. Running applets / `--ironbar` pick it up
+/// live. `step` rounds a number to a multiple of it (Ironbar sliders don't
+/// snap). Unchanged values are not written, so a dragged slider does not
+/// make every watcher reload for nothing.
+pub fn set_key(key: &str, value: &str, step: Option<u32>) -> Result<()> {
+    use cosmic_config::ConfigSet as _;
+
+    let value = match step {
+        Some(step) => snap(value, step)?,
+        None => value.to_owned(),
+    };
+    let config = Config::load();
+    macro_rules! set {
+        ($($field:ident: $ty:ty),* $(,)?) => {
+            match key {
+                $(stringify!($field) => {
+                    let value = <$ty as CliValue>::parse_cli(&value)
+                        .with_context(|| format!("invalid value for `{key}`"))?;
+                    if value != config.$field {
+                        config_handler()?.set(key, value)?;
+                    }
+                })*
+                _ => bail!("unknown setting `{key}` (see --print-default-config)"),
+            }
+        };
+    }
+    for_each_key!(set);
+    Ok(())
+}
+
+/// `value` rounded to the nearest positive multiple of `step`.
+fn snap(value: &str, step: u32) -> Result<String> {
+    let n: f64 = value
+        .trim()
+        .parse()
+        .with_context(|| format!("`{value}` is not a number"))?;
+    if step == 0 || !n.is_finite() {
+        bail!("cannot round `{value}` to steps of {step}");
+    }
+    let step = f64::from(step);
+    Ok(((n / step).round().max(1.0) * step).to_string())
+}
+
+/// `--get KEY`: the current value (default if unset).
+pub fn get_key(key: &str) -> Result<String> {
+    let config = Config::load();
+    macro_rules! get {
+        ($($field:ident: $ty:ty),* $(,)?) => {
+            match key {
+                $(stringify!($field) => Ok(CliValue::to_cli(&config.$field)),)*
+                _ => bail!("unknown setting `{key}` (see --print-default-config)"),
+            }
+        };
+    }
+    for_each_key!(get)
+}
+
+/// `--toggle KEY` for on/off settings; returns the new value.
+pub fn toggle_key(key: &str) -> Result<bool> {
+    let config = Config::load();
+    let current = match key {
+        "skip_all_day" => config.skip_all_day,
+        "skip_declined" => config.skip_declined,
+        "skip_transparent" => config.skip_transparent,
+        "skip_zero_duration" => config.skip_zero_duration,
+        "pulse_enabled" => config.pulse_enabled,
+        _ => bail!("`{key}` is not an on/off setting"),
+    };
+    set_key(key, &(!current).to_string(), None)?;
+    Ok(!current)
 }
 
 /// `$XDG_CONFIG_HOME/cosmic-ext-applet-gcal-next/ical-url`
@@ -434,6 +632,40 @@ pub fn load_url(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapping() {
+        assert_eq!(super::snap("127.3", 15).unwrap(), "120");
+        assert_eq!(super::snap("128", 15).unwrap(), "135");
+        // Never down to 0.
+        assert_eq!(super::snap("3", 15).unwrap(), "15");
+        assert!(super::snap("x", 15).is_err());
+        assert!(super::snap("10", 0).is_err());
+    }
+
+    #[test]
+    fn cli_values() {
+        use super::CliValue;
+        // Ironbar sliders pass floats.
+        assert_eq!(u32::parse_cli("150").unwrap(), 150);
+        assert_eq!(u32::parse_cli("149.6").unwrap(), 150);
+        assert!(u32::parse_cli("-1").is_err());
+        assert!(u32::parse_cli("NaN").is_err());
+        assert!(u32::parse_cli("1e20").is_err());
+        assert!(bool::parse_cli("on").unwrap());
+        assert!(!bool::parse_cli("false").unwrap());
+        assert!(bool::parse_cli("maybe").is_err());
+        assert_eq!(Option::<String>::parse_cli("  ").unwrap(), None);
+        assert_eq!(
+            Option::<String>::parse_cli("a@b.c").unwrap().to_cli(),
+            "a@b.c"
+        );
+        let tiers =
+            Vec::<super::Tier>::parse_cli("[(within_min: 5, style: (color: Theme(Warning)))]")
+                .unwrap();
+        assert_eq!(tiers[0].within_min, 5);
+        assert!(Vec::<super::Tier>::parse_cli("[oops]").is_err());
+    }
+
     use super::*;
 
     fn style(color: ColorSpec) -> Style {

@@ -1,9 +1,6 @@
 //! The COSMIC panel applet: view, update, subscriptions.
 
-mod settings;
-
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, LazyLock},
     time::{Duration, Instant, SystemTime},
@@ -13,20 +10,16 @@ use chrono::{DateTime, Local, Utc};
 use cosmic::{
     Element,
     app::{Core, Task},
-    cosmic_config::{self, CosmicConfigEntry},
     iced::{self, Alignment, Border, Length, Rectangle, Subscription, window},
     surface::action::{app_popup, destroy_popup},
     widget::{self, autosize, button, container, text},
 };
 
-pub use self::settings::Setting;
 use crate::{
     config::{self, APP_ID, Appearance, Config},
     format,
-    source::{
-        self, EventSource, IcsSource, Location, Snapshot,
-        fetch::{Backoff, Fetcher},
-    },
+    settings::{Setting, SettingsState},
+    source::{self, IcsSource, Snapshot, fetch::Backoff},
     state::{self, DisplayState, Kind},
     style,
 };
@@ -72,13 +65,8 @@ pub struct App {
     pulse_alpha: f32,
     popup: Option<window::Id>,
 
-    /// Writes settings changed in the popup; `None` if cosmic-config is
-    /// unavailable (changes then only last until the panel restarts).
-    config_handler: Option<cosmic_config::Config>,
-    /// The e-mail field while it is being edited.
-    email_draft: String,
-    /// Custom color fields while they are being edited.
-    hex_drafts: HashMap<settings::Target, String>,
+    /// The settings page (its config mirrors `config`).
+    settings: SettingsState,
     /// The popup shows the settings page instead of the meeting details.
     show_settings: bool,
 }
@@ -112,6 +100,7 @@ impl App {
         for warning in warnings {
             tracing::warn!("config: {warning}");
         }
+        self.settings.config = config.clone();
         self.config = config;
         self.appearance = appearance;
     }
@@ -132,8 +121,41 @@ impl App {
         Task::none()
     }
 
+    /// Save fields still being edited on the settings page.
+    fn save_drafts(&mut self) -> Task<Message> {
+        if self.settings.save_drafts() {
+            return self.apply_config(self.settings.config.clone());
+        }
+        Task::none()
+    }
+
+    /// The popup's settings page: header with a back button, then the
+    /// scrollable sections.
+    fn settings_page(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::active().cosmic().spacing;
+        let header = widget::Row::new()
+            .spacing(spacing.space_xs)
+            .align_y(Alignment::Center)
+            .push(
+                button::icon(widget::icon::from_name("go-previous-symbolic"))
+                    .on_press(Message::ShowSettings(false)),
+            )
+            .push(text::title4("Settings"));
+        widget::Column::new()
+            .spacing(spacing.space_s)
+            .padding([spacing.space_s, spacing.space_m])
+            .push(header)
+            .push(
+                container(widget::scrollable(
+                    self.settings.view().map(Message::Setting),
+                ))
+                .max_height(560.0),
+            )
+            .into()
+    }
+
     fn refresh_interval(&self) -> Duration {
-        Duration::from_secs(self.config.refresh_interval_secs.max(30))
+        self.config.refresh_interval()
     }
 
     fn recompute(&mut self) {
@@ -179,25 +201,10 @@ impl App {
         let Some(event) = &self.display.event else {
             return Task::none();
         };
-        let url = event.link.clone().unwrap_or_else(|| {
-            // No video link: the day in Google Calendar's web UI.
-            let day = event.start.with_timezone(&Local);
-            format!(
-                "https://calendar.google.com/calendar/r/day/{}",
-                day.format("%Y/%m/%d")
-            )
-        });
-        if let Err(err) = open::that_detached(&url) {
+        if let Err(err) = open::that_detached(state::join_url(event)) {
             tracing::warn!("failed to open the meeting link: {err}");
         }
         Task::none()
-    }
-
-    fn no_meeting_text(&self) -> String {
-        format!(
-            "No meeting in the next {}",
-            format::remaining(state::lookahead(&self.config))
-        )
     }
 
     fn pill(&self) -> Element<'_, Message> {
@@ -282,7 +289,7 @@ impl App {
             None if self.display.kind == Kind::Error => {
                 content = content.push(text::title4("Calendar not synced"));
             }
-            None => content = content.push(text::title4(self.no_meeting_text())),
+            None => content = content.push(text::title4(state::no_meeting_text(&self.config))),
         }
 
         let mut buttons = widget::Row::new()
@@ -337,35 +344,8 @@ async fn fetch(
     ics_file: Option<PathBuf>,
     tz: rrule::Tz,
 ) -> Message {
-    let source = match source {
-        Some(source) => source,
-        None => match make_source(ics_file, tz).await {
-            Ok(source) => Arc::new(source),
-            Err(err) => return Message::Fetched(None, Err(format!("{err:#}"))),
-        },
-    };
-    let (from, to) = state::expansion_window(Utc::now());
-    let result = source
-        .events(from, to)
-        .await
-        .map(|events| Snapshot {
-            events,
-            fetched_at: SystemTime::now(),
-        })
-        .map_err(|err| format!("{err:#}"));
-    Message::Fetched(Some(source), result)
-}
-
-async fn make_source(ics_file: Option<PathBuf>, tz: rrule::Tz) -> anyhow::Result<IcsSource> {
-    let (location, cache) = match ics_file {
-        // Never touch the real cache when reading a local file.
-        Some(path) => (Location::File(path), None),
-        None => (
-            Location::Url(config::load_secret_url().await?),
-            config::cache_path(),
-        ),
-    };
-    Ok(IcsSource::new(Fetcher::new(location, cache)?, tz))
+    let (source, result) = source::fetch_snapshot(source, ics_file, tz).await;
+    Message::Fetched(source, result)
 }
 
 impl cosmic::Application for App {
@@ -404,11 +384,7 @@ impl cosmic::Application for App {
             pulse_start: Instant::now(),
             pulse_alpha: 1.0,
             popup: None,
-            config_handler: cosmic_config::Config::new(APP_ID, Config::VERSION)
-                .inspect_err(|err| tracing::warn!("settings cannot be saved: {err}"))
-                .ok(),
-            email_draft: String::new(),
-            hex_drafts: HashMap::new(),
+            settings: SettingsState::new(Config::default()),
             show_settings: false,
         };
         app.set_config(config);
@@ -489,7 +465,11 @@ impl cosmic::Application for App {
                 }
             }
             Message::Config(config) => return self.apply_config(*config),
-            Message::Setting(setting) => return self.change_setting(setting),
+            Message::Setting(setting) => {
+                if self.settings.change(setting) {
+                    return self.apply_config(self.settings.config.clone());
+                }
+            }
             Message::ShowSettings(show) => {
                 self.show_settings = show;
                 if !show {
@@ -504,8 +484,7 @@ impl cosmic::Application for App {
                     let close = cosmic::task::message(cosmic::Action::Surface(destroy_popup(id)));
                     return Task::batch([save, close]);
                 }
-                self.email_draft = self.config.my_email.clone().unwrap_or_default();
-                self.hex_drafts.clear();
+                self.settings.reset_drafts();
                 self.show_settings = false;
                 return cosmic::task::message(cosmic::Action::Surface(app_popup::<App>(
                     |_| Default::default(),

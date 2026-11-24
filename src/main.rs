@@ -4,6 +4,9 @@
 mod app;
 mod config;
 mod format;
+mod ironbar;
+mod settings;
+mod settings_window;
 mod source;
 mod state;
 mod style;
@@ -27,11 +30,26 @@ Without options, runs as a COSMIC panel applet.
 
 Options:
   --once                   Fetch once and print `state label | title | start`
+  --ironbar                Keep running and print the pill as Pango markup
+                           whenever it changes (Ironbar `script` module in
+                           watch mode)
+  --refresh                Make running `--ironbar` processes fetch now
+  --join                   Open the next meeting's link (from the cache)
+  --details                Print the next meeting's title and time (from the
+                           cache), e.g. for a tooltip
   --ics-file <PATH>        Read the calendar from a local .ics file instead of
                            the secret iCal URL (also for the applet)
   --set-url                Read the secret iCal URL from stdin and store it in
                            the Secret Service keyring
-  --now <RFC3339>          Pretend it is this time (with --once)
+  --settings               Open the settings in a window (for bars without the
+                           COSMIC popup)
+  --get <KEY>              Print a setting
+  --set <KEY> <VALUE>      Change a setting (applies live); an empty value
+                           unsets `my_email`
+  --step <N>               With --set: round the number to a multiple of N
+  --toggle <KEY>           Flip an on/off setting
+  --now <RFC3339>          Pretend it is this time (with --once, --join,
+                           --details)
   --print-default-config   Print the default settings (one cosmic-config key
                            per block)
   -V, --version            Print the version
@@ -41,10 +59,19 @@ Options:
 #[derive(Debug, Default)]
 struct Args {
     once: bool,
+    ironbar: bool,
+    settings: bool,
+    refresh: bool,
+    join: bool,
+    details: bool,
     set_url: bool,
     print_default_config: bool,
     version: bool,
     help: bool,
+    get: Option<String>,
+    set: Option<(String, String)>,
+    step: Option<u32>,
+    toggle: Option<String>,
     ics_file: Option<PathBuf>,
     now: Option<DateTime<Utc>>,
 }
@@ -57,11 +84,29 @@ impl Args {
                 |name: &str| args.next().with_context(|| format!("{name} needs a value"));
             match arg.as_str() {
                 "--once" => out.once = true,
+                ironbar::FLAG => out.ironbar = true,
+                "--settings" => out.settings = true,
+                "--refresh" => out.refresh = true,
+                "--join" => out.join = true,
+                "--details" => out.details = true,
                 "--set-url" => out.set_url = true,
                 "--print-default-config" => out.print_default_config = true,
                 "-V" | "--version" => out.version = true,
                 "-h" | "--help" => out.help = true,
                 "--ics-file" => out.ics_file = Some(value("--ics-file")?.into()),
+                "--get" => out.get = Some(value("--get")?),
+                "--toggle" => out.toggle = Some(value("--toggle")?),
+                "--step" => {
+                    let step = value("--step")?;
+                    out.step = Some(
+                        step.parse()
+                            .with_context(|| format!("invalid --step `{step}`"))?,
+                    );
+                }
+                "--set" => {
+                    let key = value("--set")?;
+                    out.set = Some((key, value("--set")?));
+                }
                 "--now" => {
                     let now = value("--now")?;
                     let now = DateTime::parse_from_rfc3339(&now)
@@ -78,6 +123,8 @@ impl Args {
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        // Ironbar and journald capture stderr: no escape codes there.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
@@ -102,6 +149,27 @@ fn run() -> Result<()> {
         print_default_config()?;
     } else if args.once {
         runtime()?.block_on(once(&args))?;
+    } else if args.ironbar {
+        runtime()?.block_on(ironbar::run(args.ics_file))?;
+    } else if args.settings {
+        settings_window::run()?;
+    } else if args.refresh {
+        ironbar::refresh()?;
+    } else if args.join {
+        let now = args.now.unwrap_or_else(Utc::now);
+        runtime()?.block_on(ironbar::join(args.ics_file.as_deref(), now))?;
+    } else if args.details {
+        let now = args.now.unwrap_or_else(Utc::now);
+        println!(
+            "{}",
+            runtime()?.block_on(ironbar::details(args.ics_file.as_deref(), now))
+        );
+    } else if let Some(key) = &args.get {
+        println!("{}", config::get_key(key)?);
+    } else if let Some((key, value)) = &args.set {
+        config::set_key(key, value, args.step)?;
+    } else if let Some(key) = &args.toggle {
+        println!("{}", config::toggle_key(key)?);
     } else if args.set_url {
         runtime()?.block_on(set_url())?;
     } else {
@@ -190,31 +258,11 @@ fn print_default_config() -> Result<()> {
     let cfg = Config::default();
     let pretty = ron::ser::PrettyConfig::new();
     macro_rules! keys {
-        ($($field:ident),* $(,)?) => {
+        ($($field:ident: $ty:ty),* $(,)?) => {
             [$((stringify!($field), ron::ser::to_string_pretty(&cfg.$field, pretty.clone())?)),*]
         };
     }
-    let keys = keys!(
-        refresh_interval_secs,
-        ongoing_grace_min,
-        lookahead_min,
-        skip_all_day,
-        skip_declined,
-        my_email,
-        skip_transparent,
-        skip_zero_duration,
-        stale_after_min,
-        tiers,
-        far,
-        ongoing,
-        none,
-        error,
-        none_label,
-        ongoing_label,
-        pulse_enabled,
-        pulse_period_ms,
-        pulse_min_alpha,
-    );
+    let keys = config::for_each_key!(keys);
     let dir = format!("~/.config/cosmic/{}/v{}", config::APP_ID, Config::VERSION);
     for (key, value) in keys {
         println!("// {dir}/{key}\n{value}\n");
@@ -244,6 +292,9 @@ mod tests {
         assert_eq!(args.ics_file, Some(PathBuf::from("x.ics")));
         assert_eq!(args.now.unwrap().to_rfc3339(), "2026-11-10T09:00:00+00:00");
 
+        let args = parse(&["--set", "lookahead_min", "90"]).unwrap();
+        assert_eq!(args.set, Some(("lookahead_min".into(), "90".into())));
+        assert!(parse(&["--set", "lookahead_min"]).is_err());
         assert!(parse(&["--ics-file"]).is_err());
         assert!(parse(&["--now", "yesterday"]).is_err());
         assert!(parse(&["--bogus"]).is_err());

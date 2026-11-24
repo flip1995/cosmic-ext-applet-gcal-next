@@ -71,6 +71,31 @@ pub fn lookahead(cfg: &Config) -> Duration {
     Duration::minutes(i64::from(cfg.lookahead_min.clamp(1, MAX_LOOKAHEAD_MIN)))
 }
 
+/// What the popup / tooltip says when nothing is coming up.
+pub fn no_meeting_text(cfg: &Config) -> String {
+    format!(
+        "No meeting in the next {}",
+        format::remaining(lookahead(cfg))
+    )
+}
+
+/// What *Join* opens: the video link, else the day in Google Calendar's web
+/// UI (the feed has no event URL).
+pub fn join_url(event: &EventInfo) -> String {
+    event
+        .link
+        .clone()
+        .unwrap_or_else(|| calendar_day_url(event.start))
+}
+
+/// The day of `at` (in local time) in Google Calendar's web UI.
+pub fn calendar_day_url(at: DateTime<Utc>) -> String {
+    format!(
+        "https://calendar.google.com/calendar/r/day/{}",
+        at.with_timezone(&chrono::Local).format("%Y/%m/%d")
+    )
+}
+
 /// The window events are expanded for: one day back (long-running events)
 /// to one day past the maximum lookahead, so a fetched snapshot stays usable
 /// for any lookahead setting until the next fetch.
